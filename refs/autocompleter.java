@@ -2,17 +2,17 @@ window.$;
 let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
 webpackChunkdiscord_app.pop();
 
-const Stores = Object.values(wpRequire.c);
-const find = (key) => Stores.find(x => x?.exports?.[key])?.exports[key];
-const findProto = (key) => Stores.find(x => x?.exports?.[key]?.__proto__)?.exports[key];
+const allModules = Object.values(wpRequire.c);
 
-const ApplicationStreamingStore = findProto("A");
-const RunningGameStore = find("Ay");
-const QuestsStore = findProto("A");
-const ChannelStore = findProto("A");
-const GuildChannelStore = find("Ay");
-const FluxDispatcher = find("h");
-const api = find("Bo");
+function findExport(key) {
+    const mod = allModules.find(x => x?.exports?.[key]);
+    return mod?.exports[key];
+}
+
+function findProtoExport(key) {
+    const mod = allModules.find(x => x?.exports?.[key]?.__proto__);
+    return mod?.exports[key];
+}
 
 const supportedTasks = [
     "WATCH_VIDEO",
@@ -22,115 +22,100 @@ const supportedTasks = [
     "WATCH_VIDEO_ON_MOBILE"
 ];
 
-const config = {
-    videoSpeed: 7,
-    heartbeatInterval: 20000,
-    logPrefix: "[AutoQuest]"
-};
-
-function log(msg) {
-    console.log(`${config.logPrefix} ${msg}`);
-}
-
-function warn(msg) {
-    console.warn(`${config.logPrefix} ${msg}`);
-}
-
-function error(msg) {
-    console.error(`${config.logPrefix} ${msg}`);
-}
+let isApp = typeof DiscordNative !== "undefined";
+let questQueue = [];
 
 function getQuests() {
-    const quests = [...QuestsStore.quests.values()].filter(x => {
+    const qStore = findProtoExport("A");
+    if (!qStore?.quests) { console.log("Cannot find QuestsStore"); return []; }
+    return [...qStore.quests.values()].filter(x => {
         if (!x.userStatus?.enrolledAt) return false;
         if (x.userStatus?.completedAt) return false;
         if (new Date(x.config.expiresAt).getTime() <= Date.now()) return false;
-
-        const taskConfig = x.config.taskConfig ?? x.config.taskConfigV2;
-        const hasTask = supportedTasks.some(y => Object.keys(taskConfig.tasks).includes(y));
-        return hasTask;
+        const tc = x.config.taskConfig ?? x.config.taskConfigV2;
+        return supportedTasks.some(y => Object.keys(tc.tasks).includes(y));
     });
-    return quests;
 }
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function fetchApi(method, url, body = null) {
+async function apiPost(url, body) {
     try {
-        const opts = { url };
-        if (body) opts.body = body;
-        if (method === "post") return await api.post(opts);
-        if (method === "get") return await api.get(opts);
-    } catch (e) {
-        warn(`API error (${url}): ${e.message}`);
-        return null;
+        const m = findExport("Bo");
+        return await m.post({ url, body });
+    } catch (e) { return null; }
+}
+
+async function apiGet(url) {
+    try {
+        const m = findExport("Bo");
+        return await m.get({ url });
+    } catch (e) { return null; }
+}
+
+function processNext() {
+    const quest = questQueue.pop();
+    if (!quest) { console.log("[AutoQuest] Toutes les quests sont finies!"); return; }
+
+    const tc = quest.config.taskConfig ?? quest.config.taskConfigV2;
+    const taskName = supportedTasks.find(x => tc.tasks[x] != null);
+    const taskData = tc.tasks[taskName];
+    const qName = quest.config.messages.questName;
+    const secondsNeeded = taskData.target;
+    const secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+
+    console.log(`[AutoQuest] Processing: ${qName} [${taskName}] (${secondsDone}/${secondsNeeded}s)`);
+
+    if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
+        doVideo(quest, taskName, secondsNeeded, secondsDone, qName);
+    } else if (taskName === "PLAY_ON_DESKTOP") {
+        doPlayDesktop(quest, taskData, secondsNeeded, secondsDone, qName);
+    } else if (taskName === "STREAM_ON_DESKTOP") {
+        doStreamDesktop(quest, taskData, secondsNeeded, secondsDone, qName);
+    } else if (taskName === "PLAY_ACTIVITY") {
+        doPlayActivity(quest, taskData, secondsNeeded, qName);
     }
 }
 
-async function spoofVideo(quest) {
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-    const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
-    const taskData = taskConfig.tasks[taskName];
-    const secondsNeeded = taskData.target;
-    let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
-    const questName = quest.config.messages.questName;
+function doVideo(quest, taskName, secondsNeeded, secondsDone, qName) {
+    const speed = 7;
+    (async () => {
+        while (true) {
+            const remaining = Math.min(speed, secondsNeeded - secondsDone);
+            await sleep(remaining * 1000);
 
-    log(`Video spoofing: ${questName} (${secondsDone}/${secondsNeeded}s)`);
+            const timestamp = secondsDone + speed;
+            const res = await apiPost(`/quests/${quest.id}/video-progress`, {
+                timestamp: Math.min(secondsNeeded, timestamp + Math.random())
+            });
 
-    while (true) {
-        const remaining = Math.min(config.videoSpeed, secondsNeeded - secondsDone);
-        await sleep(remaining * 1000);
+            secondsDone = Math.min(secondsNeeded, timestamp);
+            const pct = Math.floor((secondsDone / secondsNeeded) * 100);
+            console.log(`[AutoQuest] Video: ${secondsDone}/${secondsNeeded}s (${pct}%)`);
 
-        const timestamp = secondsDone + config.videoSpeed;
-        const res = await fetchApi("post", `/quests/${quest.id}/video-progress`, {
-            timestamp: Math.min(secondsNeeded, timestamp + Math.random())
-        });
-
-        if (!res) {
-            warn("Video progress request failed, retrying...");
-            await sleep(5000);
-            continue;
+            if (timestamp >= secondsNeeded) break;
         }
 
-        secondsDone = Math.min(secondsNeeded, timestamp);
-        const progress = Math.floor((secondsDone / secondsNeeded) * 100);
-        log(`Video progress: ${secondsDone}/${secondsNeeded}s (${progress}%)`);
-
-        if (timestamp >= secondsNeeded) break;
-    }
-
-    const finalRes = await fetchApi("post", `/quests/${quest.id}/video-progress`, {
-        timestamp: secondsNeeded
-    });
-
-    log(`Video quest completed: ${questName}`);
-    return true;
+        await apiPost(`/quests/${quest.id}/video-progress`, { timestamp: secondsNeeded });
+        console.log(`[AutoQuest] Video completed: ${qName}`);
+        processNext();
+    })();
 }
 
-function spoofGame(quest) {
-    const isApp = typeof DiscordNative !== "undefined";
+function doPlayDesktop(quest, taskData, secondsNeeded, secondsDone, qName) {
     if (!isApp) {
-        warn("PLAY_ON_DESKTOP requires Discord desktop app!");
-        return false;
+        console.log("[AutoQuest] PLAY_ON_DESKTOP marche pas sur le browser, utilise l'app desktop!");
+        processNext();
+        return;
     }
 
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-    const taskName = "PLAY_ON_DESKTOP";
-    const taskData = taskConfig.tasks[taskName];
     const applicationId = quest.config.application?.id ?? taskData.applications?.[0]?.id;
-    const secondsNeeded = taskData.target;
-    const questName = quest.config.messages.questName;
     const pid = Math.floor(Math.random() * 30000) + 1000;
 
-    log(`Game spoofing: ${questName}`);
-
-    return fetchApi("get", `/applications/public?application_ids=${applicationId}`).then(res => {
-        if (!res) {
-            warn("Failed to fetch application data");
-            return false;
-        }
+    apiGet(`/applications/public?application_ids=${applicationId}`).then(res => {
+        if (!res) { console.log("[AutoQuest] Failed to get app data"); processNext(); return; }
 
         const appData = res.body[0];
         const exeName = appData.executables?.find(x => x.os === "win32")?.name?.replace(">", "") ?? appData.name.replace(/[\/\\:*?"<>|]/g, "");
@@ -149,177 +134,142 @@ function spoofGame(quest) {
             start: Date.now()
         };
 
-        const realGames = RunningGameStore.getRunningGames();
-        const realGetRunningGames = RunningGameStore.getRunningGames;
-        const realGetGameForPID = RunningGameStore.getGameForPID;
+        const rgStore = findExport("Ay");
+        if (!rgStore) { console.log("[AutoQuest] Cannot find RunningGameStore"); processNext(); return; }
 
-        RunningGameStore.getRunningGames = () => [fakeGame];
-        RunningGameStore.getGameForPID = (p) => fakeGame.pid === p ? fakeGame : null;
+        const realGames = rgStore.getRunningGames();
+        const realGetRunningGames = rgStore.getRunningGames.bind(rgStore);
+        const realGetGameForPID = rgStore.getGameForPID.bind(rgStore);
 
-        FluxDispatcher.dispatch({
-            type: "RUNNING_GAMES_CHANGE",
-            removed: realGames,
-            added: [fakeGame],
-            games: [fakeGame]
-        });
+        rgStore.getRunningGames = () => [fakeGame];
+        rgStore.getGameForPID = (p) => fakeGame.pid === p ? fakeGame : null;
 
-        log(`Spoofed as: ${appData.name}. Waiting ~${Math.ceil((secondsNeeded) / 60)} min...`);
+        const fd = findExport("h");
+        fd.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: [fakeGame] });
+
+        console.log(`[AutoQuest] Spoofed: ${appData.name}. Attends ~${Math.ceil(secondsNeeded / 60)} min.`);
 
         const fn = (data) => {
             const progress = quest.config.configVersion === 1
                 ? data.userStatus.streamProgressSeconds
-                : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP?.value ?? 0);
+                : Math.floor(data.userStatus.progress?.PLAY_ON_DESKTOP?.value ?? 0);
 
-            log(`Game progress: ${progress}/${secondsNeeded}s`);
+            console.log(`[AutoQuest] Game: ${progress}/${secondsNeeded}s`);
 
             if (progress >= secondsNeeded) {
-                log(`Game quest completed: ${questName}`);
-                RunningGameStore.getRunningGames = realGetRunningGames;
-                RunningGameStore.getGameForPID = realGetGameForPID;
-                FluxDispatcher.dispatch({
-                    type: "RUNNING_GAMES_CHANGE",
-                    removed: [fakeGame],
-                    added: [],
-                    games: []
-                });
-                FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+                console.log(`[AutoQuest] Game completed: ${qName}`);
+                rgStore.getRunningGames = realGetRunningGames;
+                rgStore.getGameForPID = realGetGameForPID;
+                fd.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: [] });
+                fd.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
                 processNext();
             }
         };
 
-        FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-        return true;
+        fd.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
     });
 }
 
-function spoofStream(quest) {
-    const isApp = typeof DiscordNative !== "undefined";
+function doStreamDesktop(quest, taskData, secondsNeeded, secondsDone, qName) {
     if (!isApp) {
-        warn("STREAM_ON_DESKTOP requires Discord desktop app!");
-        return false;
+        console.log("[AutoQuest] STREAM_ON_DESKTOP marche pas sur le browser, utilise l'app desktop!");
+        processNext();
+        return;
     }
 
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-    const taskData = taskConfig.tasks["STREAM_ON_DESKTOP"];
     const applicationId = quest.config.application?.id ?? taskData.applications?.[0]?.id;
-    const secondsNeeded = taskData.target;
-    const questName = quest.config.messages.questName;
     const pid = Math.floor(Math.random() * 30000) + 1000;
 
-    const realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-    ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({
-        id: applicationId,
-        pid,
-        sourceName: null
-    });
+    const streamStore = allModules.find(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata)?.exports.A;
+    if (!streamStore) { console.log("[AutoQuest] Cannot find StreamingStore"); processNext(); return; }
 
-    log(`Stream spoofing: ${questName}. Stream in VC for ~${Math.ceil(secondsNeeded / 60)} min.`);
+    const realFunc = streamStore.getStreamerActiveStreamMetadata.bind(streamStore);
+    streamStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
+
+    const fd = findExport("h");
+    console.log(`[AutoQuest] Spoofed stream. Stream dans un VC pour ~${Math.ceil(secondsNeeded / 60)} min.`);
 
     const fn = (data) => {
         const progress = quest.config.configVersion === 1
             ? data.userStatus.streamProgressSeconds
-            : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP?.value ?? 0);
+            : Math.floor(data.userStatus.progress?.STREAM_ON_DESKTOP?.value ?? 0);
 
-        log(`Stream progress: ${progress}/${secondsNeeded}s`);
+        console.log(`[AutoQuest] Stream: ${progress}/${secondsNeeded}s`);
 
         if (progress >= secondsNeeded) {
-            log(`Stream quest completed: ${questName}`);
-            ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
-            FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+            console.log(`[AutoQuest] Stream completed: ${qName}`);
+            streamStore.getStreamerActiveStreamMetadata = realFunc;
+            fd.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
             processNext();
         }
     };
 
-    FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-    return true;
+    fd.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
 }
 
-async function spoofActivity(quest) {
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-    const taskData = taskConfig.tasks["PLAY_ACTIVITY"];
-    const secondsNeeded = taskData.target;
-    const questName = quest.config.messages.questName;
+function doPlayActivity(quest, taskData, secondsNeeded, qName) {
+    const chStore = findProtoExport("A");
+    const guildStore = findExport("Ay");
 
-    let channelId = ChannelStore.getSortedPrivateChannels()[0]?.id;
-    if (!channelId) {
-        const guilds = Object.values(GuildChannelStore.getAllGuilds()).filter(x => x != null && x.VOCAL.length > 0);
-        channelId = guilds[0]?.VOCAL[0]?.channel?.id;
+    let channelId = null;
+
+    try {
+        channelId = chStore.getSortedPrivateChannels?.()[0]?.id;
+    } catch (e) {}
+
+    if (!channelId && guildStore) {
+        try {
+            const guilds = Object.values(guildStore.getAllGuilds()).filter(x => x != null && x.VOCAL?.length > 0);
+            channelId = guilds[0]?.VOCAL[0]?.channel?.id;
+        } catch (e) {}
     }
 
     if (!channelId) {
-        warn("No voice channel found for PLAY_ACTIVITY!");
-        return false;
-    }
-
-    const streamKey = `call:${channelId}:1`;
-    log(`Activity spoofing: ${questName}. Waiting ~${Math.ceil(secondsNeeded / 60)} min.`);
-
-    while (true) {
-        const res = await fetchApi("post", `/quests/${quest.id}/heartbeat`, {
-            stream_key: streamKey,
-            terminal: false
-        });
-
-        if (!res) {
-            warn("Heartbeat failed, retrying...");
-            await sleep(5000);
-            continue;
-        }
-
-        const progress = res.body.progress?.PLAY_ACTIVITY?.value ?? 0;
-        log(`Activity progress: ${progress}/${secondsNeeded}s`);
-
-        if (progress >= secondsNeeded) {
-            await fetchApi("post", `/quests/${quest.id}/heartbeat`, {
-                stream_key: streamKey,
-                terminal: true
-            });
-            break;
-        }
-
-        await sleep(config.heartbeatInterval);
-    }
-
-    log(`Activity quest completed: ${questName}`);
-    return true;
-}
-
-function processNext() {
-    const quest = questQueue.pop();
-    if (!quest) {
-        log("All quests processed!");
+        console.log("[AutoQuest] Pas de voice channel trouvé pour PLAY_ACTIVITY!");
+        processNext();
         return;
     }
 
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-    const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
+    const streamKey = `call:${channelId}:1`;
+    console.log(`[AutoQuest] Activity: ${qName}. Attends ~${Math.ceil(secondsNeeded / 60)} min.`);
 
-    log(`Processing: ${quest.config.messages.questName} [${taskName}]`);
+    (async () => {
+        while (true) {
+            const res = await apiPost(`/quests/${quest.id}/heartbeat`, { stream_key: streamKey, terminal: false });
+            if (!res) { await sleep(5000); continue; }
 
-    if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
-        spoofVideo(quest).then(() => processNext());
-    } else if (taskName === "PLAY_ON_DESKTOP") {
-        spoofGame(quest);
-    } else if (taskName === "STREAM_ON_DESKTOP") {
-        spoofStream(quest);
-    } else if (taskName === "PLAY_ACTIVITY") {
-        spoofActivity(quest).then(() => processNext());
-    }
+            const progress = res.body?.progress?.PLAY_ACTIVITY?.value ?? 0;
+            console.log(`[AutoQuest] Activity: ${progress}/${secondsNeeded}s`);
+
+            if (progress >= secondsNeeded) {
+                await apiPost(`/quests/${quest.id}/heartbeat`, { stream_key: streamKey, terminal: true });
+                break;
+            }
+            await sleep(20000);
+        }
+
+        console.log(`[AutoQuest] Activity completed: ${qName}`);
+        processNext();
+    })();
 }
 
-const quests = getQuests();
-let questQueue = [...quests];
+const allQuests = getQuests();
+questQueue = [...allQuests];
 
-if (quests.length === 0) {
-    log("No uncompleted quests found.");
+if (allQuests.length === 0) {
+    console.log("[AutoQuest] Aucune quest trouvée!");
 } else {
-    log(`Found ${quests.length} quest(s):`);
-    quests.forEach((q, i) => {
-        const taskConfig = q.config.taskConfig ?? q.config.taskConfigV2;
-        const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
-        const taskData = taskConfig.tasks[taskName];
-        const progress = q.userStatus?.progress?.[taskName]?.value ?? 0;
-        log(`  ${i + 1}. ${q.config.messages.questName} [${taskName}] ${progress}/${taskData.target}s`);
+    console.log(`[AutoQuest] ${allQuests.length} quest(s) trouvée(s):`);
+    allQuests.forEach((q, i) => {
+        const tc = q.config.taskConfig ?? q.config.taskConfigV2;
+        const tn = supportedTasks.find(x => tc.tasks[x] != null);
+        const td = tc.tasks[tn];
+        const p = q.userStatus?.progress?.[tn]?.value ?? 0;
+        console.log(`  ${i + 1}. ${q.config.messages.questName} [${tn}] ${p}/${td.target}s`);
     });
     processNext();
 }
+// The GameStore and StreamStore variables were using the same find(“Ay”) and findProto(“A”)  
+//so JS was crashing because they were declared twice in the same fucking scope bruv scope
+// So I defined inline within each function instead of at the beginning wich should bet better right ?
+// Also there was no fucking bind() on the stores so the context was broken and my dumbass didn't noticed that 😔
