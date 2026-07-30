@@ -272,4 +272,4 @@ if (allQuests.length === 0) {
 // The GameStore and StreamStore variables were using the same find(“Ay”) and findProto(“A”)  
 //so JS was crashing because they were declared twice in the same fucking scope bruv scope
 // So I defined inline within each function instead of at the beginning wich should bet better right ?
-// Also there was no fucking bind() on the stores so the context was broken and my dumbass didn't noticed that 😔
+// Also there was no fucking bind() on the stores so the context was broken and my dumbass didn't noticed that 😔 ng ng ng
